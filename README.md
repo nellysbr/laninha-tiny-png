@@ -259,12 +259,4 @@ If you encounter permission errors:
 
 ## License
 
-[Add your license information here]
-
-## Contributing
-
-[Add contribution guidelines here]
-
-## Support
-
-For issues, questions, or feature requests, please open an issue on the project repository.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
