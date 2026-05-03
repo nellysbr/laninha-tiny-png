@@ -1,18 +1,20 @@
 # Laninha Tiny PNG
 
-A high-performance Go application for compressing images and videos with parallel processing capabilities. Similar to TinyPNG, but designed for batch processing with multi-threaded execution.
+A high-performance Go application for compressing images and videos with parallel processing capabilities. Similar to TinyPNG, but designed for single-file or batch processing with multi-threaded execution.
 
 ## Overview
 
-Laninha Tiny PNG is a command-line tool that recursively searches through directories and automatically compresses media files to reduce storage space while maintaining visual quality. It processes multiple files in parallel, leveraging all available CPU cores for maximum performance.
+Laninha Tiny PNG is a command-line tool that compresses media files to reduce storage space while maintaining visual quality. It can process one file directly or recursively search through directories, and it processes multiple files in parallel when a folder is provided.
 
 ## Key Features
 
 - **Parallel Processing**: Multi-threaded execution using worker pools for optimal performance
 - **Recursive Search**: Automatically processes all media files in a directory and its subdirectories
+- **Single-File Input**: Can process a single image or video file directly
 - **Image Compression**: Optimizes PNG and JPEG images with quality-preserving algorithms
+- **WebP Conversion**: Optional `--webp` mode converts common image formats to WebP
 - **Video Compression**: Compresses videos using H.264 codec with configurable quality settings
-- **Automatic Replacement**: Replaces original files with compressed versions (no backup copies)
+- **Automatic Replacement**: Replaces or removes original files after successful processing (no backup copies)
 - **Progress Tracking**: Real-time display of compression statistics and space savings
 - **Portable Distribution**: Supports bundled ffmpeg binary for standalone deployment
 - **Cross-Platform**: Works on Linux, macOS, and Windows
@@ -21,8 +23,16 @@ Laninha Tiny PNG is a command-line tool that recursively searches through direct
 
 ### Images
 
+Compression mode:
+
 - PNG (maximum compression)
 - JPEG/JPG (85% quality)
+
+WebP conversion mode (`--webp`):
+
+- PNG, JPEG/JPG, GIF, BMP, TIFF/TIF, AVIF, HEIC/HEIF, ICO
+- When a single file is provided, ffmpeg is allowed to try any non-video extension
+- Output files are written as `.webp`
 
 ### Videos
 
@@ -32,7 +42,7 @@ Laninha Tiny PNG is a command-line tool that recursively searches through direct
 ## Requirements
 
 - **Go 1.24+** (for building from source)
-- **ffmpeg** (required for video compression)
+- **ffmpeg** (required for video compression and `--webp` image conversion)
 
 ## Installation
 
@@ -120,7 +130,7 @@ choco install ffmpeg
 ### Basic Usage
 
 ```bash
-laninha-tiny-png <folder-path>
+laninha-tiny-png [--webp] <file-or-folder-path>
 ```
 
 ### Examples
@@ -129,19 +139,33 @@ laninha-tiny-png <folder-path>
 # Compress all media files in current directory
 laninha-tiny-png .
 
+# Compress a single file
+laninha-tiny-png ./photo.png
+
 # Compress files in a specific folder
 laninha-tiny-png ./my-media-folder
 
 # Compress files recursively in a path
 laninha-tiny-png /home/user/photos
 
+# Convert one image to WebP and remove the original after success
+laninha-tiny-png --webp ./photo.png
+
+# Convert images in a folder to WebP recursively
+laninha-tiny-png --webp ./my-media-folder
+
 # Using Makefile
 make run ARGS='./folder/path'
+
+# Using Makefile with WebP conversion
+make run ARGS='--webp ./folder/path'
 ```
 
 ### Command-Line Options
 
-The application accepts a single argument: the path to the folder containing media files to compress.
+The application accepts one path argument, which can point to either a file or a folder.
+
+- `--webp`: Converts supported image files to WebP instead of using the built-in PNG/JPEG compression path. When the input is a single file, ffmpeg can try any non-video extension. Videos are still compressed normally.
 
 ## Output Format
 
@@ -166,6 +190,12 @@ Total files processed: 150
 Space saved: 52428800 bytes (51200.00 KB, 50.00 MB)
 ```
 
+In WebP mode, image output lines include the new file path:
+
+```
+✓ [WebP] ./media/photo1.png → ./media/photo1.webp: 1024000 bytes → 256000 bytes (75.0% saved)
+```
+
 ## Performance
 
 The application uses parallel processing to maximize performance:
@@ -187,6 +217,7 @@ Typical performance improvements:
 
 - **PNG**: Maximum compression level (best compression ratio)
 - **JPEG**: 85% quality (optimal balance between quality and file size)
+- **WebP**: 85 quality with libwebp via ffmpeg when `--webp` is enabled
 
 ### Videos
 
@@ -201,9 +232,13 @@ Typical performance improvements:
 ⚠️ **Warning**: The application **permanently replaces** original files with compressed versions. There are no backup copies created. Ensure you have backups of important files before running the compression.
 
 - Original files are overwritten only if compression succeeds
+- In `--webp` mode, the converted file is written as `<original-name>.webp` and the original file is removed only after conversion succeeds
+- If the target `.webp` file already exists, that image is skipped with an error and the original remains unchanged
+- If two images in the same folder would generate the same `.webp` path, such as `photo.png` and `photo.jpg`, processing stops before conversion starts
 - If compression fails, the original file remains unchanged
 - Windows Zone.Identifier files are automatically ignored
 - The application skips videos if ffmpeg is not available (with warning)
+- The application exits early if `--webp` is requested and ffmpeg is not available
 
 ## Makefile Commands
 

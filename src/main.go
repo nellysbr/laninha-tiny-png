@@ -10,74 +10,46 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
-	"strings"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: laninha-tiny-png <folder-path>")
-		fmt.Println("Example: laninha-tiny-png ./images")
+	cfg, err := parseCLIArgs(os.Args[1:])
+	if err != nil {
+		fmt.Println(err)
+		printUsage()
 		os.Exit(1)
 	}
 
-	folderPath := os.Args[1]
-
-	if _, err := os.Stat(folderPath); os.IsNotExist(err) {
-		fmt.Printf("Error: Folder '%s' does not exist.\n", folderPath)
+	if _, err := os.Stat(cfg.inputPath); os.IsNotExist(err) {
+		fmt.Printf("Error: Path '%s' does not exist.\n", cfg.inputPath)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Searching for media files in: %s\n", folderPath)
+	fmt.Printf("Searching for media files in: %s\n", cfg.inputPath)
 	fmt.Println("Supported formats:")
-	fmt.Println("  Images: PNG, JPEG, JPG")
+	if cfg.convertToWebP {
+		fmt.Println("  Images: PNG, JPEG, JPG, GIF, BMP, TIFF, TIF, AVIF, HEIC, HEIF, ICO")
+	} else {
+		fmt.Println("  Images: PNG, JPEG, JPG")
+	}
 	fmt.Println("  Videos: MP4, AVI, MOV, MKV, WEBM, FLV, WMV, M4V, 3GP, OGV")
 
 	ffmpegPath, ffmpegAvailable := findFFmpeg()
 	if ffmpegAvailable {
 		fmt.Printf("Using ffmpeg: %s\n", ffmpegPath)
+	} else if cfg.convertToWebP {
+		fmt.Println("Error: ffmpeg not found. WebP conversion requires ffmpeg.")
+		os.Exit(1)
 	} else {
 		fmt.Println("⚠ Warning: ffmpeg not found. Videos will be skipped.")
 	}
 
-	var filesToProcess []fileTask
-	err := filepath.Walk(folderPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		if strings.Contains(path, ":Zone.Identifier") {
-			return nil
-		}
-
-		ext := strings.ToLower(filepath.Ext(path))
-
-		if isImage(ext) {
-			filesToProcess = append(filesToProcess, fileTask{
-				path: path,
-				fileType: "image",
-			})
-		} else if isVideo(ext) {
-			if ffmpegAvailable {
-				filesToProcess = append(filesToProcess, fileTask{
-					path: path,
-					fileType: "video",
-				})
-			} else {
-				fmt.Printf("⚠ [Video] %s: ffmpeg not found. Skipping...\n", path)
-			}
-		}
-
-		return nil
-	})
-
+	filesToProcess, err := collectFileTasks(cfg.inputPath, cfg.convertToWebP, ffmpegAvailable)
 	if err != nil {
-		fmt.Printf("Error walking folder: %v\n", err)
+		fmt.Printf("Error collecting files: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -93,14 +65,14 @@ func main() {
 
 	fmt.Printf("Found %d files to process. Using %d parallel workers...\n", len(filesToProcess), numWorkers)
 
-	stats := processFilesParallel(filesToProcess, numWorkers, ffmpegPath)
+	stats := processFilesParallel(filesToProcess, numWorkers, ffmpegPath, cfg.convertToWebP)
 
 	fmt.Printf("\n=== Summary ===\n")
 	totalProcessed := atomic.LoadInt64(&stats.totalProcessed)
 	imagesProcessed := atomic.LoadInt64(&stats.imagesProcessed)
 	videosProcessed := atomic.LoadInt64(&stats.videosProcessed)
 	totalSaved := atomic.LoadInt64(&stats.totalSaved)
-	
+
 	fmt.Printf("Total files processed: %d\n", totalProcessed)
 	fmt.Printf("  - Images: %d\n", imagesProcessed)
 	fmt.Printf("  - Videos: %d\n", videosProcessed)
@@ -113,6 +85,11 @@ type fileTask struct {
 	fileType string
 }
 
+type cliConfig struct {
+	inputPath     string
+	convertToWebP bool
+}
+
 type processingStats struct {
 	totalProcessed  int64
 	imagesProcessed int64
@@ -120,7 +97,141 @@ type processingStats struct {
 	totalSaved      int64
 }
 
-func processFilesParallel(files []fileTask, numWorkers int, ffmpegPath string) *processingStats {
+func printUsage() {
+	fmt.Println("Usage: laninha-tiny-png [--webp] <file-or-folder-path>")
+	fmt.Println("Example: laninha-tiny-png ./images")
+	fmt.Println("Example: laninha-tiny-png --webp ./images/photo.png")
+}
+
+func parseCLIArgs(args []string) (cliConfig, error) {
+	var cfg cliConfig
+	var paths []string
+
+	for _, arg := range args {
+		switch arg {
+		case "--webp", "-webp":
+			cfg.convertToWebP = true
+		case "--help", "-h":
+			return cfg, fmt.Errorf("help requested")
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return cfg, fmt.Errorf("unknown option: %s", arg)
+			}
+			paths = append(paths, arg)
+		}
+	}
+
+	if len(paths) != 1 {
+		return cfg, fmt.Errorf("expected exactly one file or folder path")
+	}
+
+	cfg.inputPath = paths[0]
+	return cfg, nil
+}
+
+func collectFileTasks(inputPath string, convertToWebP bool, ffmpegAvailable bool) ([]fileTask, error) {
+	info, err := os.Stat(inputPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if !info.IsDir() {
+		task, ok := taskForPath(inputPath, convertToWebP, ffmpegAvailable)
+		if !ok {
+			ext := strings.ToLower(filepath.Ext(inputPath))
+			if convertToWebP && ext != ".webp" && !isVideo(ext) {
+				return []fileTask{{
+					path:     inputPath,
+					fileType: "image",
+				}}, nil
+			}
+			return nil, nil
+		}
+		return []fileTask{task}, nil
+	}
+
+	var filesToProcess []fileTask
+	err = filepath.Walk(inputPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		task, ok := taskForPath(path, convertToWebP, ffmpegAvailable)
+		if ok {
+			filesToProcess = append(filesToProcess, task)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if convertToWebP {
+		if err := validateWebPOutputPaths(filesToProcess); err != nil {
+			return nil, err
+		}
+	}
+
+	return filesToProcess, nil
+}
+
+func taskForPath(path string, convertToWebP bool, ffmpegAvailable bool) (fileTask, bool) {
+	if strings.Contains(path, ":Zone.Identifier") {
+		return fileTask{}, false
+	}
+
+	ext := strings.ToLower(filepath.Ext(path))
+	if convertToWebP && isWebPConvertibleImage(ext) {
+		return fileTask{
+			path:     path,
+			fileType: "image",
+		}, true
+	}
+
+	if isImage(ext) {
+		return fileTask{
+			path:     path,
+			fileType: "image",
+		}, true
+	}
+
+	if isVideo(ext) && ffmpegAvailable {
+		return fileTask{
+			path:     path,
+			fileType: "video",
+		}, true
+	}
+
+	if isVideo(ext) {
+		fmt.Printf("⚠ [Video] %s: ffmpeg not found. Skipping...\n", path)
+	}
+
+	return fileTask{}, false
+}
+
+func validateWebPOutputPaths(files []fileTask) error {
+	outputs := make(map[string]string)
+	for _, file := range files {
+		if file.fileType != "image" {
+			continue
+		}
+
+		outputPath := webPOutputPath(file.path)
+		if existingPath, exists := outputs[outputPath]; exists {
+			return fmt.Errorf("multiple images would write the same WebP output %s: %s and %s", outputPath, existingPath, file.path)
+		}
+		outputs[outputPath] = file.path
+	}
+
+	return nil
+}
+
+func processFilesParallel(files []fileTask, numWorkers int, ffmpegPath string, convertToWebP bool) *processingStats {
 	stats := &processingStats{}
 	bufferSize := numWorkers * 2
 	if bufferSize > len(files) {
@@ -145,8 +256,12 @@ func processFilesParallel(files []fileTask, numWorkers int, ffmpegPath string) *
 				var originalSize, compressedSize int64
 				var err error
 				var fileType string
+				outputPath := task.path
 
-				if task.fileType == "image" {
+				if task.fileType == "image" && convertToWebP {
+					originalSize, compressedSize, outputPath, err = convertImageToWebP(task.path, ffmpegPath)
+					fileType = "WebP"
+				} else if task.fileType == "image" {
 					originalSize, compressedSize, err = compressImage(task.path)
 					fileType = "Image"
 				} else if task.fileType == "video" {
@@ -172,8 +287,13 @@ func processFilesParallel(files []fileTask, numWorkers int, ffmpegPath string) *
 
 				percentSaved := float64(saved) * 100 / float64(originalSize)
 				printMu.Lock()
-				fmt.Printf("✓ [%s] %s: %d bytes → %d bytes (%.1f%% saved)\n",
-					fileType, task.path, originalSize, compressedSize, percentSaved)
+				if outputPath != task.path {
+					fmt.Printf("✓ [%s] %s → %s: %d bytes → %d bytes (%.1f%% saved)\n",
+						fileType, task.path, outputPath, originalSize, compressedSize, percentSaved)
+				} else {
+					fmt.Printf("✓ [%s] %s: %d bytes → %d bytes (%.1f%% saved)\n",
+						fileType, task.path, originalSize, compressedSize, percentSaved)
+				}
 				printMu.Unlock()
 			}
 		}()
@@ -250,8 +370,85 @@ func compressImage(imagePath string) (int64, int64, error) {
 	return originalSize, compressedSize, nil
 }
 
+func convertImageToWebP(imagePath string, ffmpegPath string) (int64, int64, string, error) {
+	originalInfo, err := os.Stat(imagePath)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	originalSize := originalInfo.Size()
+
+	outputPath := webPOutputPath(imagePath)
+	if _, err := os.Stat(outputPath); err == nil {
+		return 0, 0, "", fmt.Errorf("output file already exists: %s", outputPath)
+	} else if !os.IsNotExist(err) {
+		return 0, 0, "", err
+	}
+
+	tempPath := outputPath + ".tmp.webp"
+	args := []string{
+		"-i", imagePath,
+		"-c:v", "libwebp",
+		"-quality", "85",
+		"-compression_level", "6",
+		"-f", "webp",
+		"-y",
+		"-loglevel", "error",
+		tempPath,
+	}
+	cmd := exec.Command(ffmpegPath, args...)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	if err != nil {
+		os.Remove(tempPath)
+		errorMsg := stderr.String()
+		if errorMsg != "" {
+			return 0, 0, "", fmt.Errorf("error executing ffmpeg: %v\nffmpeg output: %s", err, errorMsg)
+		}
+		return 0, 0, "", fmt.Errorf("error executing ffmpeg: %v", err)
+	}
+
+	convertedInfo, err := os.Stat(tempPath)
+	if err != nil {
+		os.Remove(tempPath)
+		return 0, 0, "", err
+	}
+	convertedSize := convertedInfo.Size()
+
+	if err := os.Rename(tempPath, outputPath); err != nil {
+		os.Remove(tempPath)
+		return 0, 0, "", err
+	}
+
+	if err := os.Remove(imagePath); err != nil {
+		return 0, 0, "", err
+	}
+
+	return originalSize, convertedSize, outputPath, nil
+}
+
+func webPOutputPath(imagePath string) string {
+	ext := filepath.Ext(imagePath)
+	return strings.TrimSuffix(imagePath, ext) + ".webp"
+}
+
 func isImage(ext string) bool {
 	imageExts := []string{".png", ".jpg", ".jpeg"}
+	for _, imgExt := range imageExts {
+		if ext == imgExt {
+			return true
+		}
+	}
+	return false
+}
+
+func isWebPConvertibleImage(ext string) bool {
+	imageExts := []string{
+		".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff",
+		".avif", ".heic", ".heif", ".ico",
+	}
 	for _, imgExt := range imageExts {
 		if ext == imgExt {
 			return true
